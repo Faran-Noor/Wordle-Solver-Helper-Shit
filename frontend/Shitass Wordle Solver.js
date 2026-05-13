@@ -12,9 +12,19 @@ let currentRow = 0;
 let currentCol = 0;
 let submitted  = new Array(ROWS).fill(false);
 let history    = [];  // stateless: full guess history sent with every request
+
+let wordList   = [];
+let candidates = [];
  
 const gridEl = document.getElementById('grid');
- 
+
+async function loadWords() {
+  const res  = await fetch('Shitass word list.txt');
+  const text = await res.text();
+  wordList   = text.split('\n').map(w => w.trim().toLowerCase()).filter(w => w.length === 5);
+  candidates = [...wordList];
+}
+
 /* ── BUILD GRID ── */
 function buildGrid() {
   grid       = [];
@@ -137,8 +147,9 @@ async function handleTileClick(r, c) {
   history[r] = { guess, tiles };
  
   // refires the guess api when changing colour
-  setStatus('updating…');
-  await callSubmitGuess(guess, tiles);
+candidates = [...wordList];
+  for (const entry of history)
+    filterCandidates(entry.guess.toLowerCase(), entry.tiles.map(t => t.colour));
   await fetchSuggestions();
   setStatus('');
 }
@@ -151,18 +162,7 @@ function applyColour(r, c, colour) {
 
 /* ── API CALLS ── */
 async function callValidate(guess) {
-  /* TODO: replace with real fetch
-  const res  = await fetch(API.validate, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ guess }),
-  });
-  const data = await res.json();
-  return data.valid;
-  */
-  console.log('[MOCK] POST /api/validate', { guess });
-  await delay(100);
-  return true; // remove this when adding api
+  return wordList.includes(guess.toLowerCase());
 }
 
 // GUESS PAYLOAD LOOKS LIKE THIS for callSubmitGuess()
@@ -178,39 +178,54 @@ async function callValidate(guess) {
 // }
 
 async function callSubmitGuess(guess, tiles) {
-  /* TODO: replace with real fetch
-  await fetch(API.submitGuess, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ guess, tiles, history }),
-  });
-  */
-  console.log('[MOCK] POST /api/guess', { guess, tiles, history });
-  await delay(150);
+  filterCandidates(guess.toLowerCase(), tiles.map(t => t.colour));
 }
 
 async function fetchSuggestions() {
-  /* TODO: replace with real fetch
-  const res  = await fetch(API.suggestions, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ history }),
-  });
-  const data = await res.json();
-  renderSuggestions(data.words);
-  return;
-  */
+  renderSuggestions(scoreCandidates());
+}
 
-  // score is a bumass variable, if a coefficient/ranking wants to be shown it can be kept
-  console.log('[MOCK] POST /api/suggestions', { history });
-  await delay(250);
-  renderSuggestions([
-    { word: 'CRANE', score: 0.94 },
-    { word: 'SLATE', score: 0.89 },
-    { word: 'TRACE', score: 0.83 },
-    { word: 'CRATE', score: 0.79 },
-    { word: 'STARE', score: 0.71 },
-  ]);
+function filterCandidates(guess, colours) {
+  const greens = {}, yellows = [], greys = {}, nonGreyCount = {};
+  for (let i = 0; i < COLS; i++) {
+    const l = guess[i], c = colours[i];
+    if (c === 'green' || c === 'yellow') nonGreyCount[l] = (nonGreyCount[l] || 0) + 1;
+  }
+  for (let i = 0; i < COLS; i++) {
+    const l = guess[i], c = colours[i];
+    if (c === 'green')       greens[i] = l;
+    else if (c === 'yellow') yellows.push({ letter: l, position: i });
+    else                     greys[l] = nonGreyCount[l] || 0;
+  }
+  candidates = candidates.filter(word => {
+    for (const [pos, letter] of Object.entries(greens))
+      if (word[pos] !== letter) return false;
+    for (const { letter, position } of yellows) {
+      if (!word.includes(letter)) return false;
+      if (word[position] === letter) return false;
+    }
+    for (const [letter, maxCount] of Object.entries(greys))
+      if (word.split('').filter(l => l === letter).length > maxCount) return false;
+    return true;
+  });
+}
+
+function scoreCandidates() {
+  if (candidates.length === 0) return [];
+  const freq = Array.from({ length: COLS }, () => ({}));
+  for (const word of candidates)
+    for (let i = 0; i < COLS; i++)
+      freq[i][word[i]] = (freq[i][word[i]] || 0) + 1;
+  const scored = candidates.map(word => {
+    const seen = new Set();
+    let score = 0;
+    for (let i = 0; i < COLS; i++)
+      if (!seen.has(word[i])) { score += freq[i][word[i]] || 0; seen.add(word[i]); }
+    return { word: word.toUpperCase(), score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const max = scored[0].score;
+  return scored.slice(0, 5).map(item => ({ word: item.word, score: max > 0 ? item.score / max : 0 }));
 }
 
 /* ── RENDER SUGGESTIONS ── */
@@ -248,4 +263,4 @@ function setStatus(msg, type = '') {
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-buildGrid();
+loadWords().then(() => buildGrid());
