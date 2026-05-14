@@ -1,28 +1,29 @@
-const API = {
-  validate:    '/api/validate',     // POST { guess } → { valid: bool }
-  submitGuess: '/api/guess',        // POST { guess, tiles: [{letter, colour}], history: [...] }
-  suggestions: '/api/suggestions',  // POST { history } → { words: [{word, score}] }
-};
- 
 const ROWS = 6, COLS = 5;
 const CYCLE = ['', 'grey', 'yellow', 'green'];
- 
+
 let grid       = [];
 let currentRow = 0;
 let currentCol = 0;
 let submitted  = new Array(ROWS).fill(false);
-let history    = [];  // stateless: full guess history sent with every request
+let history    = [];
 
-let wordList   = [];
-let candidates = [];
- 
+let validWords  = [];  // 14k — used for input validation
+let answerWords = [];  // 3k  — used for suggestions
+let candidates  = [];
+
 const gridEl = document.getElementById('grid');
 
 async function loadWords() {
-  const res  = await fetch('Shitass word list.txt');
-  const text = await res.text();
-  wordList   = text.split('\n').map(w => w.trim().toLowerCase()).filter(w => w.length === 5);
-  candidates = [...wordList];
+  const [validRes, answerRes] = await Promise.all([
+    fetch('Shitass word list (old).txt'),
+    fetch('Shitass word list.txt'),
+  ]);
+  const parseList = async res =>
+    (await res.text()).split('\n').map(w => w.trim().toLowerCase()).filter(w => w.length === 5);
+
+  validWords  = await parseList(validRes);
+  answerWords = await parseList(answerRes);
+  candidates  = [...answerWords];
 }
 
 /* ── BUILD GRID ── */
@@ -32,14 +33,15 @@ function buildGrid() {
   currentCol = 0;
   submitted  = new Array(ROWS).fill(false);
   history    = [];
+  candidates = [...answerWords];
   gridEl.innerHTML = '';
- 
+
   for (let r = 0; r < ROWS; r++) {
     grid.push([]);
     const rowEl = document.createElement('div');
     rowEl.className = 'row';
     rowEl.dataset.row = r;
- 
+
     for (let c = 0; c < COLS; c++) {
       grid[r].push({ letter: '', colour: '' });
       const tile = document.createElement('div');
@@ -51,20 +53,20 @@ function buildGrid() {
     }
     gridEl.appendChild(rowEl);
   }
- 
+
   getTile(0, 0).classList.add('active');
 }
- 
+
 /* ── KEYBOARD ── */
 document.addEventListener('keydown', e => {
   if (currentRow >= ROWS) return;
   if (document.getElementById('status').classList.contains('error')) setStatus('');
- 
+
   if (e.key === 'Enter')              handleEnter();
   else if (e.key === 'Backspace')     handleBackspace();
   else if (/^[a-zA-Z]$/.test(e.key)) handleLetter(e.key.toUpperCase());
 });
- 
+
 function handleLetter(letter) {
   if (currentCol >= COLS || submitted[currentRow]) return;
   grid[currentRow][currentCol].letter = letter;
@@ -75,7 +77,7 @@ function handleLetter(letter) {
   currentCol++;
   if (currentCol < COLS) getTile(currentRow, currentCol).classList.add('active');
 }
- 
+
 function handleBackspace() {
   if (submitted[currentRow] || currentCol === 0) return;
   if (currentCol < COLS) getTile(currentRow, currentCol).classList.remove('active');
@@ -86,7 +88,7 @@ function handleBackspace() {
   tile.classList.remove('filled');
   tile.classList.add('active');
 }
- 
+
 async function handleEnter() {
   if (submitted[currentRow]) return;
   if (currentCol < COLS) {
@@ -94,11 +96,11 @@ async function handleEnter() {
     setStatus('not enough letters', 'error');
     return;
   }
- 
+
   const guess = grid[currentRow].map(c => c.letter).join('');
-  setStatus('checking…');
-  const valid = await callValidate(guess);
-  if (!valid) {
+
+  // Validate against the 14k list
+  if (!validWords.includes(guess.toLowerCase())) {
     shakeRow(currentRow);
     setStatus('not a valid word', 'error');
     return;
@@ -113,13 +115,11 @@ async function handleEnter() {
 
   const tiles = grid[currentRow].map(c => ({ letter: c.letter, colour: c.colour }));
   history.push({ guess, tiles });
-
   submitted[currentRow] = true;
   if (currentCol > 0) getTile(currentRow, currentCol - 1).classList.remove('active');
 
-  setStatus('sending…');
-  await callSubmitGuess(guess, tiles);
-  await fetchSuggestions();
+  filterCandidates(guess.toLowerCase(), tiles.map(t => t.colour));
+  renderSuggestions(scoreCandidates());
 
   currentRow++;
   currentCol = 0;
@@ -134,24 +134,22 @@ async function handleEnter() {
 
 /* ── TILE COLOUR CYCLING ── */
 async function handleTileClick(r, c) {
-  if (!grid[r][c].letter) return;
-  if (!submitted[r]) return; // only cycle colours on entered rows
+  if (!grid[r][c].letter || !submitted[r]) return;
   const cell = grid[r][c];
   const idx  = CYCLE.indexOf(cell.colour);
   const next = (idx + 1) % CYCLE.length;
   cell.colour = next === 0 ? CYCLE[1] : CYCLE[next];
   applyColour(r, c, cell.colour);
- 
+
   const tiles = grid[r].map(c => ({ letter: c.letter, colour: c.colour }));
   const guess = grid[r].map(c => c.letter).join('');
-  history[r] = { guess, tiles };
- 
-  // refires the guess api when changing colour
-candidates = [...wordList];
+  history[r]  = { guess, tiles };
+
+  // Recompute from scratch using updated history
+  candidates = [...answerWords];
   for (const entry of history)
     filterCandidates(entry.guess.toLowerCase(), entry.tiles.map(t => t.colour));
-  await fetchSuggestions();
-  setStatus('');
+  renderSuggestions(scoreCandidates());
 }
 
 function applyColour(r, c, colour) {
@@ -160,31 +158,7 @@ function applyColour(r, c, colour) {
   if (colour) tile.classList.add('state-' + colour);
 }
 
-/* ── API CALLS ── */
-async function callValidate(guess) {
-  return wordList.includes(guess.toLowerCase());
-}
-
-// GUESS PAYLOAD LOOKS LIKE THIS for callSubmitGuess()
-// {
-//   "guess": "CRANE",
-//   "tiles": [
-//     { "letter": "C", "colour": "grey" },
-//     { "letter": "R", "colour": "yellow" },
-//     { "letter": "A", "colour": "green" },
-//     { "letter": "N", "colour": "grey" },
-//     { "letter": "E", "colour": "grey" }
-//   ]
-// }
-
-async function callSubmitGuess(guess, tiles) {
-  filterCandidates(guess.toLowerCase(), tiles.map(t => t.colour));
-}
-
-async function fetchSuggestions() {
-  renderSuggestions(scoreCandidates());
-}
-
+/* ── FILTER + SCORE ── */
 function filterCandidates(guess, colours) {
   const greens = {}, yellows = [], greys = {}, nonGreyCount = {};
   for (let i = 0; i < COLS; i++) {
@@ -195,7 +169,7 @@ function filterCandidates(guess, colours) {
     const l = guess[i], c = colours[i];
     if (c === 'green')       greens[i] = l;
     else if (c === 'yellow') yellows.push({ letter: l, position: i });
-    else                     greys[l] = nonGreyCount[l] || 0;
+    else                     greys[l]  = nonGreyCount[l] || 0;
   }
   candidates = candidates.filter(word => {
     for (const [pos, letter] of Object.entries(greens))
@@ -260,7 +234,5 @@ function setStatus(msg, type = '') {
   el.textContent = msg;
   el.className = type;
 }
-
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 loadWords().then(() => buildGrid());
