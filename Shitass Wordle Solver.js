@@ -8,21 +8,25 @@ let submitted  = new Array(ROWS).fill(false);
 let history    = [];
 
 let validWords  = [];  // 14k — used for input validation
-let answerWords = [];  // 3k  — used for suggestions
+let answerWords = [];  // 3k  — used for suggestions (past answers excluded)
 let candidates  = [];
 
 const gridEl = document.getElementById('grid');
 
 async function loadWords() {
-  const [validRes, answerRes] = await Promise.all([
-    fetch('Shitass word list (old).txt'),
+  const [validRes, answerRes, usedRes] = await Promise.all([
+    fetch('Shitass word list (old) (14k).txt'),
     fetch('Shitass word list.txt'),
+    fetch('Shitass wordle list.txt'),
   ]);
   const parseList = async res =>
     (await res.text()).split('\n').map(w => w.trim().toLowerCase()).filter(w => w.length === 5);
 
-  validWords  = await parseList(validRes);
-  answerWords = await parseList(answerRes);
+  validWords = await parseList(validRes);
+  const usedAnswers = new Set(await parseList(usedRes));
+
+  // Filter out past Wordle answers from the suggestion pool
+  answerWords = (await parseList(answerRes)).filter(w => !usedAnswers.has(w));
   candidates  = [...answerWords];
 }
 
